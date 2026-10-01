@@ -4,12 +4,16 @@ package testdb
 import (
 	"context"
 	"crypto/rand"
+	"database/sql"
 	"net/url"
 	"os"
 	"strings"
 	"testing"
 
 	"github.com/jackc/pgx/v5"
+	_ "github.com/jackc/pgx/v5/stdlib"
+
+	"wallet/db"
 )
 
 // New makes an empty database on the server in TEST_DATABASE_URL and returns its URL.
@@ -52,4 +56,29 @@ func New(t *testing.T) string {
 	dbURL.Path = "/" + name
 
 	return dbURL.String()
+}
+
+// Migrated makes an empty database with New, applies the migrations, and returns its URL.
+func Migrated(t *testing.T) string {
+	t.Helper()
+
+	dbURL := New(t)
+
+	sqlDB, err := sql.Open("pgx", dbURL)
+	if err != nil {
+		t.Fatalf("open the database: %v", err)
+	}
+
+	provider, err := db.NewProvider(sqlDB)
+	if err != nil {
+		t.Fatalf("NewProvider: %v", err)
+	}
+	// Provider.Close closes sqlDB. The drop of the database in New needs all the connections closed.
+	defer func() { _ = provider.Close() }()
+
+	if _, err := provider.Up(context.Background()); err != nil {
+		t.Fatalf("apply the migrations: %v", err)
+	}
+
+	return dbURL
 }
