@@ -50,6 +50,14 @@ func (s *Store) Close() {
 	s.pool.Close()
 }
 
+// Ping makes sure that the server accepts a connection with the configured credentials.
+func (s *Store) Ping(ctx context.Context) error {
+	if err := s.pool.Ping(ctx); err != nil {
+		return fmt.Errorf("ping the database: %w", err)
+	}
+	return nil
+}
+
 // Deposit adds amount to the balance and returns the new balance.
 func (s *Store) Deposit(ctx context.Context, id uuid.UUID, amount int64) (int64, error) {
 	if amount < 0 {
