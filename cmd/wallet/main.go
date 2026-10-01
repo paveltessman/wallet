@@ -3,6 +3,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -19,14 +20,20 @@ const (
 	readHeaderTimeout = 5 * time.Second
 )
 
+var errUsage = errors.New("usage: wallet [migrate up|down|status]")
+
 func main() {
-	if err := run(); err != nil {
+	if err := run(os.Args[1:]); err != nil {
 		fmt.Fprintln(os.Stderr, "wallet:", err)
 		os.Exit(1)
 	}
 }
 
-func run() error {
+func run(args []string) error {
+	if len(args) > 0 && args[0] != "migrate" {
+		return errUsage
+	}
+
 	cfg, err := loadConfig(os.Getenv)
 	if err != nil {
 		return err
@@ -34,6 +41,13 @@ func run() error {
 
 	ctx := context.Background()
 
+	if len(args) > 0 {
+		return migrate(ctx, cfg.databaseURL(), args[1:], os.Stdout)
+	}
+	return serve(ctx, cfg)
+}
+
+func serve(ctx context.Context, cfg config) error {
 	store, err := postgres.New(ctx, postgres.Config{
 		URL:            cfg.databaseURL(),
 		MaxConns:       cfg.DBMaxConns,
