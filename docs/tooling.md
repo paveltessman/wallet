@@ -113,6 +113,7 @@ Two workflows run on each pull request. Both have `permissions: contents: read` 
 - Starts a `postgres:18-alpine` service container with a health check. The integration tests and the migrations need a real server.
 - Gives the tests `TEST_DATABASE_URL`.
 - Uses `actions/setup-go` with `go-version-file: go.mod` and the module cache.
+- Runs `make generate`, because the sqlc output is not in git.
 - Runs `make check`.
 
 ## Local environment
