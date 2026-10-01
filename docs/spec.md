@@ -146,6 +146,8 @@ Every error uses the Problem Details format from RFC 9457, with `Content-Type: a
 
 The body has no `type` field. RFC 9457 then reads `type` as `about:blank`.
 
+Outside the scope: An unknown path gets the plain-text `404` of the Go `ServeMux`. A request that the client cancels gets `500 INTERNAL_ERROR`, but the client does not receive it.
+
 ### 10. Status codes
 
 | Case                                                                                          | Status | `code`                      | `retryable`                |
@@ -162,7 +164,7 @@ The body has no `type` field. RFC 9457 then reads `type` as `about:blank`.
 | The write reached the database, but the confirmation did not come back                        | `503`  | `OPERATION_OUTCOME_UNKNOWN` | `false` (`true` for `GET`) |
 | An unexpected error (a bug)                                                                   | `500`  | `INTERNAL_ERROR`            | `false`                    |
 
-The `429` response also has the header `Retry-After`.
+The `429` response has no `Retry-After` header. The client chooses the retry delay, for example exponential backoff with jitter. `retryable: true` tells it that a retry is safe.
 
 ### 11. Meaning of "no 5xx"
 
