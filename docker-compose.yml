@@ -1,0 +1,17 @@
+services:
+  db:
+    image: postgres:18-alpine
+    # The postgres image reads POSTGRES_USER, POSTGRES_PASSWORD and POSTGRES_DB.
+    env_file: config.env
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  pgdata:

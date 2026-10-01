@@ -38,4 +38,6 @@ jobs:
       - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
+      # The sqlc output is gitignored. go vet and the tests need it.
+      - run: make generate
       - run: make check

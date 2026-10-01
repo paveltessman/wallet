@@ -113,13 +113,14 @@ Two workflows run on each pull request. Both have `permissions: contents: read` 
 - Starts a `postgres:18-alpine` service container with a health check. The integration tests and the migrations need a real server.
 - Gives the tests `TEST_DATABASE_URL`.
 - Uses `actions/setup-go` with `go-version-file: go.mod` and the module cache.
+- Runs `make generate`, because the sqlc output is not in git.
 - Runs `make check`.
 
 ## Local environment
 
 - `config.env.example` is in git. `make up` copies it to `config.env` if the file does not exist. `config.env` is gitignored.
 - `docker-compose.yml` has two services: `db` (`postgres:18-alpine`, with a health check) and `app` (it waits until `db` is healthy).
-- The host gets Postgres on port `5433`, so it does not conflict with a local Postgres on `5432`.
+- The host gets Postgres on port `5432`, the same port as the CI service container.
 - `.setenv` holds `TEST_DATABASE_URL` for the integration tests on the host. It is gitignored.
 
 ## Linter configuration

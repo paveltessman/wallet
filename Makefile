@@ -1,11 +1,18 @@
 .DEFAULT_GOAL := help
 
 BIN := bin/wallet
+SQLC_OUT := internal/postgres/internal/sqlc
 
-.PHONY: help build run check fmt tidy clean
+# .setenv gives TEST_DATABASE_URL to the integration tests on the host. CI sets it itself.
+-include .setenv
+
+.PHONY: help generate build run check fmt tidy up down psql clean
 
 help: ## List the targets.
 	@grep -E '^[a-zA-Z_-]+:.*## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*## "} {printf "  %-16s %s\n", $$1, $$2}'
+
+generate: ## Run sqlc generate.
+	go tool sqlc generate
 
 build: ## Build the binary into ./bin.
 	go build -o $(BIN) ./cmd/wallet
@@ -25,5 +32,15 @@ fmt: ## Format the Go code.
 tidy: ## Tidy go.mod and go.sum.
 	go mod tidy
 
-clean: ## Remove the build output.
-	rm -rf bin
+up: ## Start the database and the service with Docker Compose.
+	test -f config.env || cp config.env.example config.env
+	docker compose up -d --wait
+
+down: ## Stop the stack. The volumes stay.
+	docker compose down
+
+psql: ## Open psql on the dev database.
+	docker compose exec db sh -c 'psql -U "$$POSTGRES_USER" -d "$$POSTGRES_DB"'
+
+clean: ## Remove the build output and the generated files.
+	rm -rf bin $(SQLC_OUT)

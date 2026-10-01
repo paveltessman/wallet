@@ -1,0 +1,15 @@
+version: "2"
+sql:
+  - engine: postgresql
+    schema: db/migrations
+    queries: db/queries
+    gen:
+      go:
+        package: sqlc
+        out: internal/postgres/internal/sqlc
+        sql_package: pgx/v5
+        output_files_suffix: _sqlc
+        overrides:
+          # The uuid package of the standard library. pgx reads and writes it as [16]byte.
+          - db_type: uuid
+            go_type: uuid.UUID
