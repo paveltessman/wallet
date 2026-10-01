@@ -6,6 +6,9 @@ SQLC_OUT := internal/postgres/internal/sqlc
 # .setenv gives TEST_DATABASE_URL to the integration tests on the host. CI sets it itself.
 -include .setenv
 
+# The service on the host reads config.env, but it reaches the database on localhost, not on the Compose host db.
+HOST_ENV := set -a && . ./config.env && set +a && POSTGRES_HOST=localhost
+
 .PHONY: help generate build run check fmt tidy up down psql clean
 
 help: ## List the targets.
@@ -18,7 +21,7 @@ build: ## Build the binary into ./bin.
 	go build -o $(BIN) ./cmd/wallet
 
 run: ## Run the service on the host.
-	go run ./cmd/wallet
+	$(HOST_ENV) go run ./cmd/wallet
 
 check: ## Run all the CI checks: go mod tidy -diff, go vet, the tests, the lint.
 	go mod tidy -diff

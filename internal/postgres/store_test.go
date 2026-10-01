@@ -199,6 +199,26 @@ func TestStoreErrors(t *testing.T) {
 		}
 	})
 
+	t.Run("ping succeeds on a live database", func(t *testing.T) {
+		store, _ := newStore(t)
+
+		if err := store.Ping(ctx); err != nil {
+			t.Errorf("Ping: %v", err)
+		}
+	})
+
+	t.Run("ping fails on a refused connection", func(t *testing.T) {
+		store, err := postgres.New(ctx, postgres.Config{URL: closedPortURL(t), MaxConns: 1, AcquireTimeout: 5 * time.Second})
+		if err != nil {
+			t.Fatalf("New: %v", err)
+		}
+		t.Cleanup(store.Close)
+
+		if err := store.Ping(ctx); err == nil {
+			t.Error("Ping err = nil, want an error")
+		}
+	})
+
 	t.Run("a refused connection gives ErrUnavailable", func(t *testing.T) {
 		store, err := postgres.New(ctx, postgres.Config{URL: closedPortURL(t), MaxConns: 1, AcquireTimeout: 5 * time.Second})
 		if err != nil {
