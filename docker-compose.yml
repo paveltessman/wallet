@@ -1,3 +1,5 @@
+# The Makefile runs Compose with --env-file config.env, so ${HTTP_PORT} below reads config.env.
+
 services:
   db:
     image: postgres:18-alpine
@@ -12,6 +14,27 @@ services:
       interval: 5s
       timeout: 5s
       retries: 10
+
+  migrate:
+    image: wallet:dev
+    build: .
+    pull_policy: build
+    env_file: config.env
+    command: ["migrate", "up"]
+    depends_on:
+      db:
+        condition: service_healthy
+
+  app:
+    image: wallet:dev
+    build: .
+    pull_policy: build
+    env_file: config.env
+    ports:
+      - "${HTTP_PORT:?run Compose with --env-file config.env}:${HTTP_PORT}"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
 
 volumes:
   pgdata:
