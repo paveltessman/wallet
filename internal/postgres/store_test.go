@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"math"
+	"net"
 	"sync"
 	"testing"
 	"time"
@@ -171,15 +172,106 @@ func TestStoreConcurrency(t *testing.T) {
 	assertBalance(t, conn, id, start+calls*deposit-int64(withdrawn)*withdraw)
 }
 
+func TestStoreErrors(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("a full pool gives ErrOverloaded", func(t *testing.T) {
+		store, conn := newStoreWith(t, 1, 100*time.Millisecond)
+		id := insertWallet(t, conn, 100)
+
+		// The Withdraw holds the only connection of the pool while it waits for the row lock.
+		unlock := lockWallet(t, conn, id)
+		done := make(chan error)
+		go func() {
+			_, err := store.Withdraw(ctx, id, 10)
+			done <- err
+		}()
+		waitForLock(t, conn)
+
+		if _, err := store.Balance(ctx, id); !errors.Is(err, wallet.ErrOverloaded) {
+			t.Errorf("err = %v, want ErrOverloaded", err)
+		}
+
+		unlock()
+		if err := <-done; err != nil {
+			t.Errorf("Withdraw after the unlock: %v", err)
+		}
+	})
+
+	t.Run("a refused connection gives ErrUnavailable", func(t *testing.T) {
+		store, err := postgres.New(ctx, postgres.Config{URL: closedPortURL(t), MaxConns: 1, AcquireTimeout: 5 * time.Second})
+		if err != nil {
+			t.Fatalf("New: %v", err)
+		}
+		t.Cleanup(store.Close)
+		id := uuid.New()
+
+		if _, err := store.Deposit(ctx, id, 10); !errors.Is(err, wallet.ErrUnavailable) {
+			t.Errorf("Deposit err = %v, want ErrUnavailable", err)
+		}
+		if _, err := store.Withdraw(ctx, id, 10); !errors.Is(err, wallet.ErrUnavailable) {
+			t.Errorf("Withdraw err = %v, want ErrUnavailable", err)
+		}
+		if _, err := store.Balance(ctx, id); !errors.Is(err, wallet.ErrUnavailable) {
+			t.Errorf("Balance err = %v, want ErrUnavailable", err)
+		}
+	})
+
+	t.Run("a terminated backend gives ErrUnavailable", func(t *testing.T) {
+		store, conn := newStore(t)
+		id := insertWallet(t, conn, 100)
+
+		unlock := lockWallet(t, conn, id)
+		done := make(chan error)
+		go func() {
+			_, err := store.Deposit(ctx, id, 10)
+			done <- err
+		}()
+		pid := waitForLock(t, conn)
+
+		// The server sends 57P01 admin_shutdown before it closes the connection.
+		if _, err := conn.Exec(ctx, "SELECT pg_terminate_backend($1)", pid); err != nil {
+			t.Fatalf("terminate the backend: %v", err)
+		}
+		if err := <-done; !errors.Is(err, wallet.ErrUnavailable) {
+			t.Errorf("err = %v, want ErrUnavailable", err)
+		}
+
+		unlock()
+		assertBalance(t, conn, id, 100)
+	})
+
+	t.Run("a cancelled caller gives no domain error", func(t *testing.T) {
+		store, conn := newStore(t)
+		id := insertWallet(t, conn, 100)
+
+		cancelled, cancel := context.WithCancel(ctx)
+		cancel()
+
+		_, err := store.Balance(cancelled, id)
+		if !errors.Is(err, context.Canceled) {
+			t.Errorf("err = %v, want context.Canceled", err)
+		}
+		if errors.Is(err, wallet.ErrOverloaded) || errors.Is(err, wallet.ErrUnavailable) {
+			t.Errorf("err = %v, want no domain error", err)
+		}
+	})
+}
+
 // newStore makes a Store on a migrated test database.
 // It also returns a direct connection for the test setup and the checks.
 func newStore(t *testing.T) (*postgres.Store, *pgx.Conn) {
+	t.Helper()
+	return newStoreWith(t, 10, 5*time.Second)
+}
+
+func newStoreWith(t *testing.T, maxConns int32, acquireTimeout time.Duration) (*postgres.Store, *pgx.Conn) {
 	t.Helper()
 
 	dbURL := testdb.Migrated(t)
 	ctx := context.Background()
 
-	store, err := postgres.New(ctx, postgres.Config{URL: dbURL, MaxConns: 10, AcquireTimeout: 5 * time.Second})
+	store, err := postgres.New(ctx, postgres.Config{URL: dbURL, MaxConns: maxConns, AcquireTimeout: acquireTimeout})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -216,4 +308,71 @@ func assertBalance(t *testing.T, conn *pgx.Conn, id uuid.UUID, want int64) {
 	if balance != want {
 		t.Errorf("balance = %d, want %d", balance, want)
 	}
+}
+
+// lockWallet locks the row of the wallet in a transaction on a new connection. The returned function ends the transaction.
+// The lock does not use conn, because pg_stat_activity keeps one snapshot for a transaction and waitForLock reads it on conn.
+func lockWallet(t *testing.T, conn *pgx.Conn, id uuid.UUID) (unlock func()) {
+	t.Helper()
+
+	ctx := context.Background()
+	lockConn, err := pgx.ConnectConfig(ctx, conn.Config())
+	if err != nil {
+		t.Fatalf("connect for the lock: %v", err)
+	}
+	if _, err := lockConn.Exec(ctx, "BEGIN"); err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	if _, err := lockConn.Exec(ctx, "SELECT 1 FROM wallets WHERE id = $1 FOR UPDATE", id); err != nil {
+		t.Fatalf("lock the wallet: %v", err)
+	}
+
+	var once sync.Once
+	unlock = func() {
+		once.Do(func() {
+			// Close ends the transaction with a rollback.
+			if err := lockConn.Close(ctx); err != nil {
+				t.Errorf("close the lock connection: %v", err)
+			}
+		})
+	}
+	t.Cleanup(unlock)
+	return unlock
+}
+
+// waitForLock waits until one backend of the test database waits for a row lock, and returns its PID.
+func waitForLock(t *testing.T, conn *pgx.Conn) int32 {
+	t.Helper()
+
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		var pid int32
+		err := conn.QueryRow(context.Background(),
+			"SELECT pid FROM pg_stat_activity WHERE datname = current_database() AND wait_event_type = 'Lock'",
+		).Scan(&pid)
+		if err == nil {
+			return pid
+		}
+		if !errors.Is(err, pgx.ErrNoRows) {
+			t.Fatalf("read pg_stat_activity: %v", err)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("no backend waits for a row lock after 5s")
+	return 0
+}
+
+// closedPortURL returns a database URL with a local port that refuses connections.
+func closedPortURL(t *testing.T) string {
+	t.Helper()
+
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	addr := listener.Addr().String()
+	if err := listener.Close(); err != nil {
+		t.Fatalf("close the listener: %v", err)
+	}
+	return "postgres://wallet:wallet@" + addr + "/wallet?sslmode=disable"
 }

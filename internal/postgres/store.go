@@ -56,7 +56,13 @@ func (s *Store) Deposit(ctx context.Context, id uuid.UUID, amount int64) (int64,
 		return 0, fmt.Errorf("deposit a negative amount %d", amount)
 	}
 
-	balance, err := sqlc.New(s.pool).Deposit(ctx, sqlc.DepositParams{ID: id, Amount: amount})
+	conn, err := s.acquire(ctx)
+	if err != nil {
+		return 0, err
+	}
+	defer conn.Release()
+
+	balance, err := sqlc.New(conn).Deposit(ctx, sqlc.DepositParams{ID: id, Amount: amount})
 	if err != nil {
 		// On a deposit, no row can only mean an unknown wallet.
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -66,7 +72,7 @@ func (s *Store) Deposit(ctx context.Context, id uuid.UUID, amount int64) (int64,
 		if errors.As(err, &pgErr) && pgErr.Code == sqlstateNumericOutOfRange {
 			return 0, wallet.ErrBalanceLimitExceeded
 		}
-		return 0, fmt.Errorf("deposit: %w", err)
+		return 0, fmt.Errorf("deposit: %w", classify(ctx, err))
 	}
 
 	return balance, nil
@@ -78,9 +84,9 @@ func (s *Store) Withdraw(ctx context.Context, id uuid.UUID, amount int64) (int64
 		return 0, fmt.Errorf("withdraw a negative amount %d", amount)
 	}
 
-	conn, err := s.pool.Acquire(ctx)
+	conn, err := s.acquire(ctx)
 	if err != nil {
-		return 0, fmt.Errorf("acquire a connection: %w", err)
+		return 0, err
 	}
 	defer conn.Release()
 
@@ -92,12 +98,12 @@ func (s *Store) Withdraw(ctx context.Context, id uuid.UUID, amount int64) (int64
 		return balance, nil
 	}
 	if !errors.Is(err, pgx.ErrNoRows) {
-		return 0, fmt.Errorf("withdraw: %w", err)
+		return 0, fmt.Errorf("withdraw: %w", classify(ctx, err))
 	}
 
 	exists, err := queries.WalletExists(ctx, id)
 	if err != nil {
-		return 0, fmt.Errorf("look up the wallet: %w", err)
+		return 0, fmt.Errorf("look up the wallet: %w", classify(ctx, err))
 	}
 	if !exists {
 		return 0, wallet.ErrNotFound
@@ -107,13 +113,66 @@ func (s *Store) Withdraw(ctx context.Context, id uuid.UUID, amount int64) (int64
 
 // Balance returns the balance of the wallet.
 func (s *Store) Balance(ctx context.Context, id uuid.UUID) (int64, error) {
-	balance, err := sqlc.New(s.pool).GetBalance(ctx, id)
+	conn, err := s.acquire(ctx)
+	if err != nil {
+		return 0, err
+	}
+	defer conn.Release()
+
+	balance, err := sqlc.New(conn).GetBalance(ctx, id)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return 0, wallet.ErrNotFound
 		}
-		return 0, fmt.Errorf("get the balance: %w", err)
+		return 0, fmt.Errorf("get the balance: %w", classify(ctx, err))
 	}
 
 	return balance, nil
+}
+
+// acquire waits for a free connection up to the acquire timeout
+func (s *Store) acquire(ctx context.Context) (*pgxpool.Conn, error) {
+	acquireCtx, cancel := context.WithTimeout(ctx, s.acquireTimeout)
+	defer cancel()
+
+	conn, err := s.pool.Acquire(acquireCtx)
+	if err == nil {
+		return conn, nil
+	}
+
+	var connectErr *pgconn.ConnectError
+	switch {
+	case ctx.Err() != nil:
+		// The caller went away, not a database error.
+	case errors.As(err, &connectErr):
+		err = fmt.Errorf("%w: %w", wallet.ErrUnavailable, err)
+	case errors.Is(err, context.DeadlineExceeded):
+		// A slow dial also ends here, because the pool then returns only the context error.
+		err = fmt.Errorf("%w: %w", wallet.ErrOverloaded, err)
+	}
+	return nil, fmt.Errorf("acquire a connection: %w", err)
+}
+
+// classify maps the error of a statement to a domain error where the operation surely did not apply.
+// Any other error stays as it is.
+func classify(ctx context.Context, err error) error {
+	if ctx.Err() != nil {
+		return err
+	}
+
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) {
+		// The server rejected the statement, so it did not apply. Only these classes mean that the database is not available:
+		// 08 connection exception, 53 insufficient resources, 57 operator intervention.
+		switch pgErr.Code[:2] {
+		case "08", "53", "57":
+			return fmt.Errorf("%w: %w", wallet.ErrUnavailable, err)
+		}
+		return err
+	}
+
+	if pgconn.SafeToRetry(err) {
+		return fmt.Errorf("%w: %w", wallet.ErrUnavailable, err)
+	}
+	return err
 }
