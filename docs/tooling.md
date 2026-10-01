@@ -100,7 +100,7 @@ Squawk finds unsafe migrations, for example a lock on a large table. `.squawk.to
 
 ## GitHub CI
 
-Two workflows run on each pull request and on each push to `main`. Both have `permissions: contents: read` and a `concurrency` group that cancels the old run on a new push.
+Two workflows run on each pull request. Both have `permissions: contents: read` and a `concurrency` group that cancels the old run on a new push.
 
 ### `ci.yml`: pre-commit
 
