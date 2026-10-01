@@ -38,6 +38,8 @@ Tools outside Go:
 | `build`          | Build the binary into `./bin`.                                             |
 | `run`            | Run the service on the host.                                               |
 | `check`          | Run all the CI checks: `go mod tidy -diff`, `go vet`, the tests, the lint. |
+| `fmt`            | Format the Go code with `golangci-lint fmt`.                               |
+| `tidy`           | Run `go mod tidy`.                                                         |
 | `migrate`        | Apply the pending migrations.                                              |
 | `migrate-status` | Show the applied migrations.                                               |
 | `psql`           | Open `psql` on the dev database.                                           |
@@ -88,9 +90,9 @@ default_stages: [pre-commit]
 | -------------------------------------------------------------------------------------------------------------------------------- | ---------- | ----------------------------- |
 | `check-yaml`, `end-of-file-fixer`, `trailing-whitespace`, `check-added-large-files`, `check-merge-conflict`, `mixed-line-ending` | pre-commit | `pre-commit/pre-commit-hooks` |
 | `squawk` on `db/migrations`                                                                                                      | pre-commit | `sbdchd/squawk`, as in `yaa`  |
-| `golangci-lint fmt`                                                                                                              | pre-commit | local, `go tool`              |
-| `go mod tidy`                                                                                                                    | pre-commit | local                         |
-| `make check`                                                                                                                     | pre-push   | local                         |
+| `golangci-lint fmt`                                                                                                              | pre-commit | local, `make fmt`             |
+| `go mod tidy`                                                                                                                    | pre-commit | local, `make tidy`            |
+| `make check`                                                                                                                     | pre-push   | local, `make check`           |
 
 The local hooks use `language: system`, so they run the tool versions from `go.mod`.
 
@@ -98,7 +100,7 @@ Squawk finds unsafe migrations, for example a lock on a large table. `.squawk.to
 
 ## GitHub CI
 
-Two workflows run on each pull request. Both have `permissions: contents: read` and a `concurrency` group that cancels the old run on a new push.
+Two workflows run on each pull request and on each push to `main`. Both have `permissions: contents: read` and a `concurrency` group that cancels the old run on a new push.
 
 ### `ci.yml`: pre-commit
 
