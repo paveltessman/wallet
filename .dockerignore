@@ -1,0 +1,9 @@
+.git
+.github
+.claude
+bin
+docs
+config.env
+.setenv
+
+internal/postgres/internal/sqlc

@@ -9,7 +9,10 @@ SQLC_OUT := internal/postgres/internal/sqlc
 # The service on the host reads config.env, but it reaches the database on localhost, not on the Compose host db.
 HOST_ENV := set -a && . ./config.env && set +a && POSTGRES_HOST=localhost
 
-.PHONY: help generate build run check fmt tidy migrate migrate-status up down psql clean
+# Compose reads config.env for the interpolation in docker-compose.yml, not only for the containers.
+COMPOSE := docker compose --env-file config.env
+
+.PHONY: help generate build run check fmt tidy migrate migrate-status up down logs psql clean
 
 help: ## List the targets.
 	@grep -E '^[a-zA-Z_-]+:.*## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*## "} {printf "  %-16s %s\n", $$1, $$2}'
@@ -41,15 +44,18 @@ migrate: ## Apply the pending migrations.
 migrate-status: ## Show the applied migrations.
 	$(HOST_ENV) go run ./cmd/wallet migrate status
 
-up: ## Start the database and the service with Docker Compose.
+up: ## Build and start the database and the service with Docker Compose.
 	test -f config.env || cp config.env.example config.env
-	docker compose up -d --wait
+	$(COMPOSE) up -d --wait
 
 down: ## Stop the stack. The volumes stay.
-	docker compose down
+	$(COMPOSE) down
+
+logs: ## Follow the service logs.
+	$(COMPOSE) logs -f app
 
 psql: ## Open psql on the dev database.
-	docker compose exec db sh -c 'psql -U "$$POSTGRES_USER" -d "$$POSTGRES_DB"'
+	$(COMPOSE) exec db sh -c 'psql -U "$$POSTGRES_USER" -d "$$POSTGRES_DB"'
 
 clean: ## Remove the build output and the generated files.
 	rm -rf bin $(SQLC_OUT)
