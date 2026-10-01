@@ -2,6 +2,9 @@
 
 BIN := bin/wallet
 
+# .setenv gives TEST_DATABASE_URL to the integration tests on the host. CI sets it itself.
+-include .setenv
+
 .PHONY: help build run check fmt tidy up down psql clean
 
 help: ## List the targets.

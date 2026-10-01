@@ -1,0 +1,9 @@
+# goose runs each migration in a transaction.
+assume_in_transaction = true
+
+# These rules protect large tables under live traffic. They do not apply to this small service.
+excluded_rules = [
+    "ban-drop-table",
+    "require-lock-timeout",
+    "require-statement-timeout",
+]
