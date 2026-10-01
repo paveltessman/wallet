@@ -36,5 +36,15 @@ services:
       migrate:
         condition: service_completed_successfully
 
+  # make load runs this service. The profile keeps it out of make up.
+  k6:
+    image: grafana/k6:2.3.0
+    profiles: [load]
+    volumes:
+      - ./load:/scripts:ro
+    environment:
+      BASE_URL: http://app:${HTTP_PORT}
+    command: ["run", "/scripts/wallet.js"]
+
 volumes:
   pgdata:
