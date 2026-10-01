@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
 	"time"
 	"uuid"
 
@@ -26,6 +27,10 @@ type Config struct {
 type Store struct {
 	pool           *pgxpool.Pool
 	acquireTimeout time.Duration
+
+	// mu guards queues and the cancelled flags of the queued writes.
+	mu     sync.Mutex
+	queues map[uuid.UUID]*queue
 }
 
 func New(ctx context.Context, cfg Config) (*Store, error) {
@@ -40,7 +45,7 @@ func New(ctx context.Context, cfg Config) (*Store, error) {
 		return nil, fmt.Errorf("make the connection pool: %w", err)
 	}
 
-	return &Store{pool: pool, acquireTimeout: cfg.AcquireTimeout}, nil
+	return &Store{pool: pool, acquireTimeout: cfg.AcquireTimeout, queues: make(map[uuid.UUID]*queue)}, nil
 }
 
 func (s *Store) Close() {
@@ -90,14 +95,6 @@ type operation struct {
 type result struct {
 	balance int64
 	err     error
-}
-
-func (s *Store) write(ctx context.Context, id uuid.UUID, op operation) (int64, error) {
-	results, err := s.applyBatch(ctx, id, []operation{op})
-	if err != nil {
-		return 0, err
-	}
-	return results[0].balance, results[0].err
 }
 
 // applyBatch applies ops to the wallet in order, in one transaction.

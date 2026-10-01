@@ -222,7 +222,22 @@ Properties:
 - The strategy works with more than one application instance.
 - An error before the `COMMIT` means that nothing applied, because the server rolls back a transaction that does not commit. Only a lost `COMMIT` result gives `OPERATION_OUTCOME_UNKNOWN` (decision 12).
 
-Risk: Each write holds the row lock until the commit flushes the WAL. The commit time thus sets the maximum rate on one wallet.
+Each write holds the row lock until the commit flushes the WAL. One wallet thus gets at most one commit for each WAL flush. pgbench with 50 clients and one row gave 524 commits per second on WSL2, where `fdatasync` takes 1.4 ms. The target load needs about 667 writes per second.
+
+#### Group commit
+
+The service groups the writes to one wallet, so that many writes share one transaction and one WAL flush:
+
+- Each wallet with pending writes has a queue in the service and one worker goroutine.
+- The worker takes all the writes from the queue, up to 1000, and applies them in one transaction, in the queue order.
+- While a batch commits, the next writes collect in the queue. Thus the batch grows with the load, and at low load a write waits for no timer.
+- Each write gets its own result. A failed write, for example `INSUFFICIENT_FUNDS`, does not change the balance for the next writes in the batch.
+- An error of the transaction goes to every write in the batch.
+- When the queue is empty, the worker removes it and stops.
+
+Cancellation: If the context of a request ends while its write waits in the queue, the write does not apply. If the write is already in a batch, it applies. The batch does not use the context of one request, because it serves many requests.
+
+Each instance groups only its own writes. The row lock keeps the result correct with more than one instance.
 
 ### 15. Test scope
 
