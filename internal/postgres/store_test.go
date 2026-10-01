@@ -5,6 +5,7 @@ import (
 	"errors"
 	"math"
 	"net"
+	"net/url"
 	"sync"
 	"testing"
 	"time"
@@ -241,6 +242,48 @@ func TestStoreErrors(t *testing.T) {
 		assertBalance(t, conn, id, 100)
 	})
 
+	t.Run("a lost result gives ErrOutcomeUnknown", func(t *testing.T) {
+		dbURL := testdb.Migrated(t)
+		conn, err := pgx.Connect(ctx, dbURL)
+		if err != nil {
+			t.Fatalf("connect to the test database: %v", err)
+		}
+		t.Cleanup(func() { _ = conn.Close(context.Background()) })
+
+		proxyURL, err := url.Parse(dbURL)
+		if err != nil {
+			t.Fatalf("parse the database URL: %v", err)
+		}
+		proxy := newProxy(t, proxyURL.Host)
+		proxyURL.Host = proxy.addr()
+
+		store, err := postgres.New(ctx, postgres.Config{URL: proxyURL.String(), MaxConns: 1, AcquireTimeout: 5 * time.Second})
+		if err != nil {
+			t.Fatalf("New: %v", err)
+		}
+		t.Cleanup(store.Close)
+
+		id := insertWallet(t, conn, 100)
+
+		// The Deposit statement reaches the server and waits for the row lock. Then the network fails.
+		unlock := lockWallet(t, conn, id)
+		done := make(chan error)
+		go func() {
+			_, err := store.Deposit(ctx, id, 10)
+			done <- err
+		}()
+		waitForLock(t, conn)
+		proxy.cut()
+
+		if err := <-done; !errors.Is(err, wallet.ErrOutcomeUnknown) {
+			t.Errorf("err = %v, want ErrOutcomeUnknown", err)
+		}
+
+		// The server does not see the lost client while it waits for the lock. The deposit applies after the unlock.
+		unlock()
+		waitForBalance(t, conn, id, 110)
+	})
+
 	t.Run("a cancelled caller gives no domain error", func(t *testing.T) {
 		store, conn := newStore(t)
 		id := insertWallet(t, conn, 100)
@@ -375,4 +418,22 @@ func closedPortURL(t *testing.T) string {
 		t.Fatalf("close the listener: %v", err)
 	}
 	return "postgres://wallet:wallet@" + addr + "/wallet?sslmode=disable"
+}
+
+// waitForBalance waits until the balance of the wallet is want.
+func waitForBalance(t *testing.T, conn *pgx.Conn, id uuid.UUID, want int64) {
+	t.Helper()
+
+	var balance int64
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if err := conn.QueryRow(context.Background(), "SELECT balance FROM wallets WHERE id = $1", id).Scan(&balance); err != nil {
+			t.Fatalf("read the balance: %v", err)
+		}
+		if balance == want {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("balance = %d after 5s, want %d", balance, want)
 }

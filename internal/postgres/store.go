@@ -103,7 +103,12 @@ func (s *Store) Withdraw(ctx context.Context, id uuid.UUID, amount int64) (int64
 
 	exists, err := queries.WalletExists(ctx, id)
 	if err != nil {
-		return 0, fmt.Errorf("look up the wallet: %w", classify(ctx, err))
+		classified := classify(ctx, err)
+		// The UPDATE changed no row, so the operation did not apply even if the result of this read is lost.
+		if errors.Is(classified, wallet.ErrOutcomeUnknown) {
+			classified = fmt.Errorf("%w: %w", wallet.ErrUnavailable, err)
+		}
+		return 0, fmt.Errorf("look up the wallet: %w", classified)
 	}
 	if !exists {
 		return 0, wallet.ErrNotFound
@@ -153,8 +158,8 @@ func (s *Store) acquire(ctx context.Context) (*pgxpool.Conn, error) {
 	return nil, fmt.Errorf("acquire a connection: %w", err)
 }
 
-// classify maps the error of a statement to a domain error where the operation surely did not apply.
-// Any other error stays as it is.
+// classify maps the error of a statement to a domain error.
+// A server error of another class stays as it is.
 func classify(ctx context.Context, err error) error {
 	if ctx.Err() != nil {
 		return err
@@ -174,5 +179,6 @@ func classify(ctx context.Context, err error) error {
 	if pgconn.SafeToRetry(err) {
 		return fmt.Errorf("%w: %w", wallet.ErrUnavailable, err)
 	}
-	return err
+	// pgx sent the statement, but the result did not come back. The server can still apply it.
+	return fmt.Errorf("%w: %w", wallet.ErrOutcomeUnknown, err)
 }
