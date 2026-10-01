@@ -15,7 +15,10 @@ COMPOSE := docker compose --env-file config.env
 # make load seeds this wallet and sends the load to it.
 LOAD_WALLET_ID := 00000000-0000-4000-8000-000000000001
 
-.PHONY: help generate build run check fmt tidy migrate migrate-status up down logs psql load clean
+# make load-wallets seeds this number of wallets and sends the load to random wallets.
+LOAD_WALLET_COUNT := 10000
+
+.PHONY: help generate build run check fmt tidy migrate migrate-status up down logs psql load load-wallets clean
 
 help: ## List the targets.
 	@grep -E '^[a-zA-Z_-]+:.*## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*## "} {printf "  %-16s %s\n", $$1, $$2}'
@@ -63,6 +66,10 @@ psql: ## Open psql on the dev database.
 load: up ## Run the k6 load test against the local stack.
 	$(COMPOSE) exec -T db sh -c 'psql -v ON_ERROR_STOP=1 -v id=$(LOAD_WALLET_ID) -U "$$POSTGRES_USER" -d "$$POSTGRES_DB"' < load/seed.sql
 	$(COMPOSE) run --rm -e WALLET_ID=$(LOAD_WALLET_ID) k6
+
+load-wallets: up ## Run the k6 load test on random wallets against the local stack.
+	$(COMPOSE) exec -T db sh -c 'psql -v ON_ERROR_STOP=1 -v count=$(LOAD_WALLET_COUNT) -U "$$POSTGRES_USER" -d "$$POSTGRES_DB"' < load/seed-wallets.sql
+	$(COMPOSE) run --rm -e WALLET_COUNT=$(LOAD_WALLET_COUNT) k6 run /scripts/wallets.js
 
 clean: ## Remove the build output and the generated files.
 	rm -rf bin $(SQLC_OUT)
