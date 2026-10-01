@@ -1,10 +1,9 @@
 // The load test: 1000 RPS on one wallet with no error status.
 // make load seeds the wallet and gives BASE_URL and WALLET_ID.
 
-import http from "k6/http";
 import { check } from "k6";
+import { baseURL, getBalance, operation, summaryTrendStats, thresholds } from "./lib.js";
 
-const baseURL = __ENV.BASE_URL;
 const walletID = __ENV.WALLET_ID;
 
 // Each iteration sends 3 requests, so 1000 iterations in 3 s give 1000 RPS.
@@ -21,48 +20,15 @@ export const options = {
       maxVUs: 500,
     },
   },
-  thresholds: {
-    http_req_failed: ["rate==0"],
-    checks: ["rate==1"],
-    dropped_iterations: ["count==0"],
-  },
-  summaryTrendStats: ["avg", "med", "p(95)", "p(99)", "max"],
+  thresholds,
+  summaryTrendStats,
 };
-
-function getBalance() {
-  const res = http.get(`${baseURL}/api/v1/wallet/${walletID}`, {
-    tags: { name: "GET /api/v1/wallet/{walletId}" },
-  });
-  checkStatus(res);
-  return res.status === 200 ? res.json("balance") : null;
-}
-
-function operation(operationType, amount) {
-  const res = http.post(
-    `${baseURL}/api/v1/wallet`,
-    JSON.stringify({ walletId: walletID, operationType, amount }),
-    {
-      headers: { "Content-Type": "application/json" },
-      tags: { name: `POST /api/v1/wallet ${operationType}` },
-    },
-  );
-  checkStatus(res);
-}
-
-// Separate checks show in the summary which rule failed.
-function checkStatus(res) {
-  check(res, {
-    "not 5xx": (r) => r.status < 500,
-    "not 429": (r) => r.status !== 429,
-    "status 200": (r) => r.status === 200,
-  });
-}
 
 export function setup() {
   if (!baseURL || !walletID) {
     throw new Error("BASE_URL and WALLET_ID must be set. Run make load.");
   }
-  const balance = getBalance();
+  const balance = getBalance(walletID);
   if (balance === null) {
     throw new Error(`Cannot read the balance of wallet ${walletID}. Run make load, which seeds the wallet.`);
   }
@@ -73,13 +39,13 @@ export function setup() {
 // Other VUs run at the same time, so the requests of different iterations interleave on the row lock.
 export default function () {
   const amount = 1 + Math.floor(Math.random() * 100);
-  operation("DEPOSIT", amount);
-  operation("WITHDRAW", amount);
-  getBalance();
+  operation(walletID, "DEPOSIT", amount);
+  operation(walletID, "WITHDRAW", amount);
+  getBalance(walletID);
 }
 
 export function teardown(data) {
-  const finalBalance = getBalance();
+  const finalBalance = getBalance(walletID);
   check(finalBalance, {
     "final balance equals start balance": (b) => b === data.startBalance,
   });

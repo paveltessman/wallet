@@ -48,6 +48,7 @@ The k6 load test (spec decision 15) runs in the `grafana/k6` container.
 | `down`           | Stop the stack. The volumes stay.                                          |
 | `logs`           | Follow the service logs.                                                   |
 | `load`           | Run the k6 load test against the local stack.                              |
+| `load-wallets`   | Run the k6 load test on random wallets against the local stack.            |
 | `clean`          | Remove the build output and the generated files.                           |
 
 `check` is read-only.
@@ -124,7 +125,7 @@ Two workflows run on each pull request. Both have `permissions: contents: read` 
   - `db`: `postgres:18-alpine`, with a health check.
   - `migrate`: runs `wallet migrate up` one time, after `db` is healthy.
   - `app`: starts after `migrate` exits with code 0.
-  - `k6`: runs `load/wallet.js` against `app`. It has the profile `load`, so `make up` does not start it.
+  - `k6`: runs `load/wallet.js` against `app`. `make load-wallets` runs `load/wallets.js` in the same service. It has the profile `load`, so `make up` does not start it.
 - `migrate` and `app` use one image from the `Dockerfile`. `pull_policy: build` makes Compose build the image on each `up`. The BuildKit cache makes a build with no changes fast.
 - The `Makefile` runs Compose with `--env-file config.env`, so `docker-compose.yml` can read `HTTP_PORT`. `app` publishes `HTTP_PORT` on the same port of the host. A `docker compose` call without `--env-file` stops with an error.
 - The host gets Postgres on port `5432`, the same port as the CI service container.
