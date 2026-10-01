@@ -1,12 +1,9 @@
--- name: Deposit :one
-UPDATE wallets SET balance = balance + @amount WHERE id = @id RETURNING balance;
+-- name: LockBalance :one
+-- FOR UPDATE holds the row lock until the commit, so the writes to one wallet run in sequence.
+SELECT balance FROM wallets WHERE id = @id FOR UPDATE;
 
--- name: Withdraw :one
--- The WHERE clause keeps the balance at zero or above. A missing row means an unknown wallet or insufficient funds.
-UPDATE wallets SET balance = balance - @amount WHERE id = @id AND balance >= @amount RETURNING balance;
-
--- name: WalletExists :one
-SELECT EXISTS (SELECT 1 FROM wallets WHERE id = @id);
+-- name: SetBalance :exec
+UPDATE wallets SET balance = @balance WHERE id = @id;
 
 -- name: GetBalance :one
 SELECT balance FROM wallets WHERE id = @id;
