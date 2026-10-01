@@ -1,4 +1,4 @@
-// Package wallet holds the domain errors of the service.
+// Package wallet holds the domain rules and errors of the service.
 package wallet
 
 import "errors"

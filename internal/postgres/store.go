@@ -16,9 +16,6 @@ import (
 	"wallet/internal/wallet"
 )
 
-// sqlstateNumericOutOfRange is the SQLSTATE of a BIGINT overflow.
-const sqlstateNumericOutOfRange = "22003"
-
 // Config holds the settings of the connection pool.
 type Config struct {
 	URL            string
@@ -64,25 +61,10 @@ func (s *Store) Deposit(ctx context.Context, id uuid.UUID, amount int64) (int64,
 		return 0, fmt.Errorf("deposit a negative amount %d", amount)
 	}
 
-	conn, err := s.acquire(ctx)
+	balance, err := s.write(ctx, id, operation{apply: wallet.Deposit, amount: amount})
 	if err != nil {
-		return 0, err
+		return 0, fmt.Errorf("deposit: %w", err)
 	}
-	defer conn.Release()
-
-	balance, err := sqlc.New(conn).Deposit(ctx, sqlc.DepositParams{ID: id, Amount: amount})
-	if err != nil {
-		// On a deposit, no row can only mean an unknown wallet.
-		if errors.Is(err, pgx.ErrNoRows) {
-			return 0, wallet.ErrNotFound
-		}
-		var pgErr *pgconn.PgError
-		if errors.As(err, &pgErr) && pgErr.Code == sqlstateNumericOutOfRange {
-			return 0, wallet.ErrBalanceLimitExceeded
-		}
-		return 0, fmt.Errorf("deposit: %w", classify(ctx, err))
-	}
-
 	return balance, nil
 }
 
@@ -92,36 +74,76 @@ func (s *Store) Withdraw(ctx context.Context, id uuid.UUID, amount int64) (int64
 		return 0, fmt.Errorf("withdraw a negative amount %d", amount)
 	}
 
-	conn, err := s.acquire(ctx)
+	balance, err := s.write(ctx, id, operation{apply: wallet.Withdraw, amount: amount})
+	if err != nil {
+		return 0, fmt.Errorf("withdraw: %w", err)
+	}
+	return balance, nil
+}
+
+// operation is one DEPOSIT or WITHDRAW. apply is wallet.Deposit or wallet.Withdraw.
+type operation struct {
+	apply  func(balance, amount int64) (int64, error)
+	amount int64
+}
+
+type result struct {
+	balance int64
+	err     error
+}
+
+func (s *Store) write(ctx context.Context, id uuid.UUID, op operation) (int64, error) {
+	results, err := s.applyBatch(ctx, id, []operation{op})
 	if err != nil {
 		return 0, err
 	}
+	return results[0].balance, results[0].err
+}
+
+// applyBatch applies ops to the wallet in order, in one transaction.
+// The error of one op goes into its result and does not change the balance for the next ops.
+// A returned error applies to all the ops.
+func (s *Store) applyBatch(ctx context.Context, id uuid.UUID, ops []operation) ([]result, error) {
+	conn, err := s.acquire(ctx)
+	if err != nil {
+		return nil, err
+	}
 	defer conn.Release()
 
-	// The EXISTS read uses the same connection, so it does not wait in the pool after the UPDATE.
-	queries := sqlc.New(conn)
-
-	balance, err := queries.Withdraw(ctx, sqlc.WithdrawParams{ID: id, Amount: amount})
-	if err == nil {
-		return balance, nil
-	}
-	if !errors.Is(err, pgx.ErrNoRows) {
-		return 0, fmt.Errorf("withdraw: %w", classify(ctx, err))
-	}
-
-	exists, err := queries.WalletExists(ctx, id)
+	tx, err := conn.Begin(ctx)
 	if err != nil {
-		classified := classify(ctx, err)
-		// The UPDATE changed no row, so the operation did not apply even if the result of this read is lost.
-		if errors.Is(classified, wallet.ErrOutcomeUnknown) {
-			classified = fmt.Errorf("%w: %w", wallet.ErrUnavailable, err)
+		return nil, fmt.Errorf("begin: %w", classifyBeforeCommit(ctx, err))
+	}
+	// After a commit, the rollback does nothing.
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	queries := sqlc.New(tx)
+
+	balance, err := queries.LockBalance(ctx, id)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, wallet.ErrNotFound
 		}
-		return 0, fmt.Errorf("look up the wallet: %w", classified)
+		return nil, fmt.Errorf("lock the wallet: %w", classifyBeforeCommit(ctx, err))
 	}
-	if !exists {
-		return 0, wallet.ErrNotFound
+
+	results := make([]result, len(ops))
+	for i, op := range ops {
+		next, err := op.apply(balance, op.amount)
+		if err == nil {
+			balance = next
+		}
+		results[i] = result{balance: next, err: err}
 	}
-	return 0, wallet.ErrInsufficientFunds
+
+	if err := queries.SetBalance(ctx, sqlc.SetBalanceParams{ID: id, Balance: balance}); err != nil {
+		return nil, fmt.Errorf("set the balance: %w", classifyBeforeCommit(ctx, err))
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("commit: %w", classifyCommit(ctx, err))
+	}
+
+	return results, nil
 }
 
 // Balance returns the balance of the wallet.
@@ -188,5 +210,26 @@ func classify(ctx context.Context, err error) error {
 		return fmt.Errorf("%w: %w", wallet.ErrUnavailable, err)
 	}
 	// pgx sent the statement, but the result did not come back. The server can still apply it.
+	return fmt.Errorf("%w: %w", wallet.ErrOutcomeUnknown, err)
+}
+
+// classifyBeforeCommit classifies the error of a statement before the COMMIT.
+// The server rolls back a transaction that does not commit, so a lost result also means that nothing applied.
+func classifyBeforeCommit(ctx context.Context, err error) error {
+	classified := classify(ctx, err)
+	if errors.Is(classified, wallet.ErrOutcomeUnknown) {
+		return fmt.Errorf("%w: %w", wallet.ErrUnavailable, err)
+	}
+	return classified
+}
+
+// classifyCommit classifies the error of the COMMIT.
+// pgx sends the COMMIT with the simple protocol. That path reports a lost result as "conn closed",
+// and pgconn.SafeToRetry calls this error safe. Thus only an error from the server proves that the COMMIT did not apply.
+func classifyCommit(ctx context.Context, err error) error {
+	var pgErr *pgconn.PgError
+	if ctx.Err() != nil || errors.As(err, &pgErr) {
+		return classify(ctx, err)
+	}
 	return fmt.Errorf("%w: %w", wallet.ErrOutcomeUnknown, err)
 }

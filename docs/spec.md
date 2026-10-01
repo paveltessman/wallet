@@ -150,19 +150,19 @@ Outside the scope: An unknown path gets the plain-text `404` of the Go `ServeMux
 
 ### 10. Status codes
 
-| Case                                                                                          | Status | `code`                      | `retryable`                |
-| --------------------------------------------------------------------------------------------- | ------ | --------------------------- | -------------------------- |
-| The operation is applied                                                                      | `200`  |                             |                            |
-| The balance is read                                                                           | `200`  |                             |                            |
-| Malformed JSON, a missing or unknown field, a bad UUID, a bad `operationType`, a bad `amount` | `400`  | `INVALID_REQUEST`           | `false`                    |
-| The wallet does not exist                                                                     | `404`  | `WALLET_NOT_FOUND`          | `false`                    |
-| The HTTP method is wrong                                                                      | `405`  | `METHOD_NOT_ALLOWED`        | `false`                    |
-| The balance is less than `amount` on `WITHDRAW`                                               | `409`  | `INSUFFICIENT_FUNDS`        | `false`                    |
-| The balance goes above the `BIGINT` maximum on `DEPOSIT`                                      | `409`  | `BALANCE_LIMIT_EXCEEDED`    | `false`                    |
-| No database connection is free within the wait limit                                          | `429`  | `SERVICE_OVERLOADED`        | `true`                     |
-| The database is not available                                                                 | `503`  | `DATABASE_UNAVAILABLE`      | `true`                     |
-| The write reached the database, but the confirmation did not come back                        | `503`  | `OPERATION_OUTCOME_UNKNOWN` | `false` (`true` for `GET`) |
-| An unexpected error (a bug)                                                                   | `500`  | `INTERNAL_ERROR`            | `false`                    |
+| Case                                                                                              | Status | `code`                      | `retryable`                |
+| ------------------------------------------------------------------------------------------------- | ------ | --------------------------- | -------------------------- |
+| The operation is applied                                                                          | `200`  |                             |                            |
+| The balance is read                                                                               | `200`  |                             |                            |
+| Malformed JSON, a missing or unknown field, a bad UUID, a bad `operationType`, a bad `amount`     | `400`  | `INVALID_REQUEST`           | `false`                    |
+| The wallet does not exist                                                                         | `404`  | `WALLET_NOT_FOUND`          | `false`                    |
+| The HTTP method is wrong                                                                          | `405`  | `METHOD_NOT_ALLOWED`        | `false`                    |
+| The balance is less than `amount` on `WITHDRAW`                                                   | `409`  | `INSUFFICIENT_FUNDS`        | `false`                    |
+| The balance goes above the `BIGINT` maximum on `DEPOSIT`                                          | `409`  | `BALANCE_LIMIT_EXCEEDED`    | `false`                    |
+| No database connection is free within the wait limit                                              | `429`  | `SERVICE_OVERLOADED`        | `true`                     |
+| The database is not available                                                                     | `503`  | `DATABASE_UNAVAILABLE`      | `true`                     |
+| The `COMMIT` of a write or the read of a `GET` reached the database, but result did not come back | `503`  | `OPERATION_OUTCOME_UNKNOWN` | `false` (`true` for `GET`) |
+| An unexpected error (a bug)                                                                       | `500`  | `INTERNAL_ERROR`            | `false`                    |
 
 The `429` response has no `Retry-After` header. The client chooses the retry delay, for example exponential backoff with jitter. `retryable: true` tells it that a retry is safe.
 
@@ -184,7 +184,7 @@ The request has no idempotency key. Every error body has the field `retryable`.
 
 `retryable` is `true` only when the service knows that the operation did not apply, and a later retry can succeed.
 
-If the write reached the database but the confirmation did not come back, the service returns `OPERATION_OUTCOME_UNKNOWN` with `retryable: false`. `GET` changes nothing, so this case is `retryable: true` for `GET`.
+If the `COMMIT` reached the database but the confirmation did not come back, the service returns `OPERATION_OUTCOME_UNKNOWN` with `retryable: false`. `GET` changes nothing, so this case is `retryable: true` for `GET`.
 
 Known limitation: If the client loses the response (a client timeout or a network fault), a retry of `POST` can apply the operation two times. The service stores no history (decision 13), so it cannot find the duplicate.
 
@@ -196,30 +196,31 @@ The database stores only the current balance, not the list of change events.
 
 ### 14. Concurrency strategy
 
-Each operation is one atomic `UPDATE` statement. The PostgreSQL row lock puts all writes to one wallet in sequence.
-
-`DEPOSIT`:
+Each write is one transaction. The PostgreSQL row lock puts all writes to one wallet in sequence.
 
 ```sql
-UPDATE wallets SET balance = balance + $2 WHERE id = $1 RETURNING balance;
+BEGIN;
+SELECT balance FROM wallets WHERE id = $1 FOR UPDATE;
+-- The service applies the operation to the balance in Go.
+UPDATE wallets SET balance = $2 WHERE id = $1;
+COMMIT;
 ```
 
-`WITHDRAW`:
+If the `SELECT` finds no row, the service returns `404`.
 
-```sql
-UPDATE wallets SET balance = balance - $2 WHERE id = $1 AND balance >= $2 RETURNING balance;
-```
+The service applies the operation in Go, with the rules in the `wallet` package:
 
-If the `UPDATE` changes no row, the service reads `SELECT EXISTS (SELECT 1 FROM wallets WHERE id = $1)`. No row gives `404`. A row gives `409`, for `WITHDRAW` only.
+- `DEPOSIT` above the `BIGINT` maximum gives `409 BALANCE_LIMIT_EXCEEDED` (decision 7).
+- `WITHDRAW` above the balance gives `409 INSUFFICIENT_FUNDS` (decision 6).
 
-If the `DEPOSIT` statement fails with SQLSTATE `22003`, the service returns `409 BALANCE_LIMIT_EXCEEDED` (decision 7).
+The `CHECK (balance >= 0)` constraint of the table stays as a safety net against a bug.
 
 Properties:
 
-- The statement runs in autocommit, so it holds the lock only for the statement and the commit.
 - Each transaction locks one row, so deadlocks cannot occur.
-- `READ COMMITTED` gives no serialization failures.
+- `SELECT ... FOR UPDATE` in `READ COMMITTED` gives no serialization failures.
 - The strategy works with more than one application instance.
+- An error before the `COMMIT` means that nothing applied, because the server rolls back a transaction that does not commit. Only a lost `COMMIT` result gives `OPERATION_OUTCOME_UNKNOWN` (decision 12).
 
 Risk: Each write holds the row lock until the commit flushes the WAL. The commit time thus sets the maximum rate on one wallet.
 

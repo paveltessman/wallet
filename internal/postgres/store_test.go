@@ -262,31 +262,48 @@ func TestStoreErrors(t *testing.T) {
 		assertBalance(t, conn, id, 100)
 	})
 
-	t.Run("a lost result gives ErrOutcomeUnknown", func(t *testing.T) {
-		dbURL := testdb.Migrated(t)
-		conn, err := pgx.Connect(ctx, dbURL)
-		if err != nil {
-			t.Fatalf("connect to the test database: %v", err)
-		}
-		t.Cleanup(func() { _ = conn.Close(context.Background()) })
-
-		proxyURL, err := url.Parse(dbURL)
-		if err != nil {
-			t.Fatalf("parse the database URL: %v", err)
-		}
-		proxy := newProxy(t, proxyURL.Host)
-		proxyURL.Host = proxy.addr()
-
-		store, err := postgres.New(ctx, postgres.Config{URL: proxyURL.String(), MaxConns: 1, AcquireTimeout: 5 * time.Second})
-		if err != nil {
-			t.Fatalf("New: %v", err)
-		}
-		t.Cleanup(store.Close)
-
+	t.Run("a lost connection before the commit gives ErrUnavailable", func(t *testing.T) {
+		store, conn, proxy := newProxyStore(t)
 		id := insertWallet(t, conn, 100)
 
-		// The Deposit statement reaches the server and waits for the row lock. Then the network fails.
+		// The Deposit waits for the row lock in its transaction. Then the network fails.
 		unlock := lockWallet(t, conn, id)
+		done := make(chan error)
+		go func() {
+			_, err := store.Deposit(ctx, id, 10)
+			done <- err
+		}()
+		pid := waitForLock(t, conn)
+		proxy.cut()
+
+		if err := <-done; !errors.Is(err, wallet.ErrUnavailable) {
+			t.Errorf("err = %v, want ErrUnavailable", err)
+		}
+
+		// After the unlock, the backend finds the lost client and rolls back.
+		unlock()
+		waitForExit(t, conn, pid)
+		assertBalance(t, conn, id, 100)
+	})
+
+	t.Run("a lost commit result gives ErrOutcomeUnknown", func(t *testing.T) {
+		store, conn, proxy := newProxyStore(t)
+		id := insertWallet(t, conn, 100)
+
+		// The deferred trigger runs in the COMMIT and waits for the advisory lock of the test.
+		if _, err := conn.Exec(ctx, `
+			CREATE FUNCTION wait_for_test() RETURNS trigger LANGUAGE plpgsql AS $$
+			BEGIN
+				PERFORM pg_advisory_xact_lock(1);
+				RETURN NULL;
+			END $$;
+			CREATE CONSTRAINT TRIGGER wait_at_commit AFTER UPDATE ON wallets
+			DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION wait_for_test();
+			SELECT pg_advisory_lock(1);
+		`); err != nil {
+			t.Fatalf("make the commit wait: %v", err)
+		}
+
 		done := make(chan error)
 		go func() {
 			_, err := store.Deposit(ctx, id, 10)
@@ -299,8 +316,10 @@ func TestStoreErrors(t *testing.T) {
 			t.Errorf("err = %v, want ErrOutcomeUnknown", err)
 		}
 
-		// The server does not see the lost client while it waits for the lock. The deposit applies after the unlock.
-		unlock()
+		// The server does not see the lost client while it waits for the lock. The commit completes after the unlock.
+		if _, err := conn.Exec(ctx, "SELECT pg_advisory_unlock(1)"); err != nil {
+			t.Fatalf("unlock: %v", err)
+		}
 		waitForBalance(t, conn, id, 110)
 	})
 
@@ -347,6 +366,36 @@ func newStoreWith(t *testing.T, maxConns int32, acquireTimeout time.Duration) (*
 	t.Cleanup(func() { _ = conn.Close(context.Background()) })
 
 	return store, conn
+}
+
+// newProxyStore makes a Store that reaches a migrated test database through a proxy, so that the test can cut the network.
+// It also returns a direct connection for the test setup and the checks.
+func newProxyStore(t *testing.T) (*postgres.Store, *pgx.Conn, *proxy) {
+	t.Helper()
+
+	dbURL := testdb.Migrated(t)
+	ctx := context.Background()
+
+	conn, err := pgx.Connect(ctx, dbURL)
+	if err != nil {
+		t.Fatalf("connect to the test database: %v", err)
+	}
+	t.Cleanup(func() { _ = conn.Close(context.Background()) })
+
+	proxyURL, err := url.Parse(dbURL)
+	if err != nil {
+		t.Fatalf("parse the database URL: %v", err)
+	}
+	p := newProxy(t, proxyURL.Host)
+	proxyURL.Host = p.addr()
+
+	store, err := postgres.New(ctx, postgres.Config{URL: proxyURL.String(), MaxConns: 1, AcquireTimeout: 5 * time.Second})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	t.Cleanup(store.Close)
+
+	return store, conn, p
 }
 
 // insertWallet inserts a wallet with the balance and returns its ID.
@@ -423,6 +472,26 @@ func waitForLock(t *testing.T, conn *pgx.Conn) int32 {
 	}
 	t.Fatal("no backend waits for a row lock after 5s")
 	return 0
+}
+
+// waitForExit waits until the backend with the PID ends.
+func waitForExit(t *testing.T, conn *pgx.Conn, pid int32) {
+	t.Helper()
+
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		var exists bool
+		if err := conn.QueryRow(context.Background(),
+			"SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE pid = $1)", pid,
+		).Scan(&exists); err != nil {
+			t.Fatalf("read pg_stat_activity: %v", err)
+		}
+		if !exists {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("backend %d still runs after 5s", pid)
 }
 
 // closedPortURL returns a database URL with a local port that refuses connections.
