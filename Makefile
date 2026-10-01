@@ -2,7 +2,7 @@
 
 BIN := bin/wallet
 
-.PHONY: help build run check fmt tidy clean
+.PHONY: help build run check fmt tidy up down psql clean
 
 help: ## List the targets.
 	@grep -E '^[a-zA-Z_-]+:.*## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*## "} {printf "  %-16s %s\n", $$1, $$2}'
@@ -24,6 +24,16 @@ fmt: ## Format the Go code.
 
 tidy: ## Tidy go.mod and go.sum.
 	go mod tidy
+
+up: ## Start the database and the service with Docker Compose.
+	test -f config.env || cp config.env.example config.env
+	docker compose up -d --wait
+
+down: ## Stop the stack. The volumes stay.
+	docker compose down
+
+psql: ## Open psql on the dev database.
+	docker compose exec db sh -c 'psql -U "$$POSTGRES_USER" -d "$$POSTGRES_DB"'
 
 clean: ## Remove the build output.
 	rm -rf bin
