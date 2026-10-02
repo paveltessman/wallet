@@ -220,12 +220,10 @@ Properties:
 - Each transaction locks one row, so deadlocks cannot occur.
 - `SELECT ... FOR UPDATE` in `READ COMMITTED` gives no serialization failures.
 - The strategy works with more than one application instance.
-- An error before the `COMMIT` means that nothing applied, because the server rolls back a transaction that does not commit. Only a lost `COMMIT` result gives `OPERATION_OUTCOME_UNKNOWN` (decision 12).
 
-Each write holds the row lock until the commit flushes the WAL. One wallet thus gets at most one commit for each WAL flush. pgbench with 50 clients and one row gave 524 commits per second on WSL2, where `fdatasync` takes 1.4 ms. The target load needs about 667 writes per second.
+Each write holds the row lock until the commit flushes the WAL. One wallet thus gets at most one commit for each WAL flush.
 
 #### Group commit
-
 The service groups the writes to one wallet, so that many writes share one transaction and one WAL flush:
 
 - Each wallet with pending writes has a queue in the service and one worker goroutine.
@@ -240,8 +238,6 @@ Cancellation: If the context of a request ends while its write waits in the queu
 Each instance groups only its own writes. The row lock keeps the result correct with more than one instance.
 
 ### 15. Test scope
-
-Unit tests for request validation, the handlers, and the error mapping. The storage layer is a mock.
 
 Integration tests with a real PostgreSQL in Docker.
 
@@ -296,7 +292,7 @@ A wrong HTTP method gets `405 METHOD_NOT_ALLOWED`, as on the API paths.
 
 The command `wallet healthcheck` sends `GET /health/ready` to `127.0.0.1` on `HTTP_PORT` with a 2-second timeout. It exits with code 0 on `200`, and with code 1 on any other result. The runtime image has no shell and no HTTP client, so Docker runs the probe through the binary.
 
-The `app` service in `docker-compose.yml` uses this command as its health check. The `Dockerfile` has no `HEALTHCHECK`, because the `migrate` service uses the same image. Compose restarts nothing on an unhealthy status, so the status only reports the problem.
+The `app` service in `docker-compose.yml` uses this command as its health check.
 
 ### 18. API documentation
 

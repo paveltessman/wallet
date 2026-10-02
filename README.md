@@ -2,7 +2,22 @@
 
 This is some test assignment. The full spec can be found in [docs](docs/spec.md), as well as the decisions I made.
 
-## Performance tests
+## Quick start
+
+You need Docker and Go.
+
+```sh
+make check  # Run the CI checks: go mod tidy, go vet, the tests, and the lint.
+make up     # Build and start the database, the migrations, and the service. The API listens on HTTP_PORT from config.env (8080 by default).
+make load   # Run the k6 load test against the local stack.
+make down   # Stop the stack.
+```
+
+`make up` copies `config.env.example` to `config.env` if `config.env` does not exist. Run `make help` to see all the targets.
+
+## Features
+
+### Commits in batches
 
 While the chosen write strategy may seem overengineered, there is a reason.
 
@@ -16,9 +31,7 @@ So, together with Claude, we agreed on the following strategy:
 - Worker writes all updates for this wallet in batches, aka in one transaction.
 - While worker is busy, new incoming requests for this wallet are collected in a queue.
 
-Of course, we clean up workers and queues when they are no longer needed, and so on.
-
-Load tests with k6 before and after.
+Load tests with k6 before and after (1000 rps on one wallet):
 
 <details>
  <summary>Old design (awaiting WAL flush for every incoming write request)</summary>
@@ -167,3 +180,20 @@ one_wallet ✓ [======================================] 000/100 VUs  1m0s  333.3
 ```
 
 </details>
+
+### Graceful shutdown
+
+On `SIGTERM` or `SIGINT`, the service stops to accept new connections, lets the requests in progress finish, and lets the workers commit their batches. The shutdown has a limit of 8 seconds.
+
+### Health checks
+
+- `GET /health/live`: the process serves HTTP. No database call.
+- `GET /health/ready`: the database answers a ping within 1 second. Else `503`.
+
+## Idempotency
+
+The API, as described in the task, has no idempotency key. I kept the API and added `retryable` field to every error body. It is `true` only when the service knows that the operation did not apply.
+
+This does not cover a lost response. If the client times out and retries a `POST`, the operation can apply two times. An idempotency key is the correct fix for this case.
+
+See [decision 12](docs/spec.md#12-idempotency) for the details.
