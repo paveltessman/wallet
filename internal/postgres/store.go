@@ -28,10 +28,16 @@ type Store struct {
 	pool           *pgxpool.Pool
 	acquireTimeout time.Duration
 
-	// mu guards queues and the cancelled flags of the queued writes.
+	// mu guards queues, closed, and the cancelled flags of the queued writes.
 	mu     sync.Mutex
 	queues map[uuid.UUID]*queue
+	closed bool
+
+	workers sync.WaitGroup
 }
+
+// errClosed is the error of a call after Close.
+var errClosed = fmt.Errorf("%w: the store is closed", wallet.ErrUnavailable)
 
 func New(ctx context.Context, cfg Config) (*Store, error) {
 	poolCfg, err := pgxpool.ParseConfig(cfg.URL)
@@ -48,7 +54,13 @@ func New(ctx context.Context, cfg Config) (*Store, error) {
 	return &Store{pool: pool, acquireTimeout: cfg.AcquireTimeout, queues: make(map[uuid.UUID]*queue)}, nil
 }
 
+// Close rejects new calls, waits for the workers to apply the writes in their queues, then closes the pool.
 func (s *Store) Close() {
+	s.mu.Lock()
+	s.closed = true
+	s.mu.Unlock()
+
+	s.workers.Wait()
 	s.pool.Close()
 }
 
@@ -145,6 +157,13 @@ func (s *Store) applyBatch(ctx context.Context, id uuid.UUID, ops []operation) (
 
 // Balance returns the balance of the wallet.
 func (s *Store) Balance(ctx context.Context, id uuid.UUID) (int64, error) {
+	s.mu.Lock()
+	closed := s.closed
+	s.mu.Unlock()
+	if closed {
+		return 0, fmt.Errorf("get the balance: %w", errClosed)
+	}
+
 	conn, err := s.acquire(ctx)
 	if err != nil {
 		return 0, err
