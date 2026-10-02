@@ -24,7 +24,7 @@ const (
 	shutdownTimeout = 8 * time.Second
 )
 
-var errUsage = errors.New("usage: wallet [migrate up|down|status]")
+var errUsage = errors.New("usage: wallet [migrate up|down|status | healthcheck]")
 
 func main() {
 	if err := run(os.Args[1:]); err != nil {
@@ -34,7 +34,7 @@ func main() {
 }
 
 func run(args []string) error {
-	if len(args) > 0 && args[0] != "migrate" {
+	if len(args) > 0 && args[0] != "migrate" && args[0] != "healthcheck" {
 		return errUsage
 	}
 
@@ -46,10 +46,17 @@ func run(args []string) error {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, os.Interrupt)
 	defer stop()
 
-	if len(args) > 0 {
+	switch {
+	case len(args) == 0:
+		return serve(ctx, cfg)
+	case args[0] == "healthcheck":
+		if len(args) != 1 {
+			return errUsage
+		}
+		return healthcheck(ctx, readyURL(cfg.HTTPPort), healthcheckTimeout)
+	default:
 		return migrate(ctx, cfg.databaseURL(), args[1:], os.Stdout)
 	}
-	return serve(ctx, cfg)
 }
 
 func serve(ctx context.Context, cfg config) error {
