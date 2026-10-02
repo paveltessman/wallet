@@ -30,7 +30,7 @@ build: ## Build the binary into ./bin.
 	go build -o $(BIN) ./cmd/wallet
 
 run: ## Run the service on the host.
-	$(HOST_ENV) go run ./cmd/wallet
+	$(HOST_ENV) go run ./cmd/wallet serve
 
 check: ## Run all the CI checks: go mod tidy -diff, go vet, the tests, the lint.
 	go mod tidy -diff

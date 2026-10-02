@@ -2,14 +2,27 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
+	"os"
 	"strconv"
 	"time"
 )
 
 const healthcheckTimeout = 2 * time.Second
+
+func runHealthcheck(ctx context.Context, args []string) error {
+	if len(args) != 0 {
+		return errors.New("usage: wallet healthcheck")
+	}
+	cfg, err := loadConfig(os.Getenv)
+	if err != nil {
+		return err
+	}
+	return healthcheck(ctx, readyURL(cfg.HTTPPort), healthcheckTimeout)
+}
 
 func readyURL(port int) string {
 	return "http://" + net.JoinHostPort("127.0.0.1", strconv.Itoa(port)) + "/health/ready"
