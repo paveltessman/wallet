@@ -266,12 +266,60 @@ func TestMethodNotAllowed(t *testing.T) {
 	}
 }
 
+func TestHealth(t *testing.T) {
+	t.Run("live gives 200 and does not call the store", func(t *testing.T) {
+		// The fake fails the test on any call.
+		rec := serve(t, &fakeStore{t: t}, http.MethodGet, "/health/live", "")
+
+		assertStatus(t, rec, http.StatusOK, "application/json")
+		assertBody(t, rec, map[string]any{"status": "ok"})
+	})
+
+	t.Run("ready gives 200 when the ping succeeds", func(t *testing.T) {
+		var hasDeadline bool
+		store := &fakeStore{t: t, ping: func(ctx context.Context) error {
+			_, hasDeadline = ctx.Deadline()
+			return nil
+		}}
+
+		rec := serve(t, store, http.MethodGet, "/health/ready", "")
+
+		assertStatus(t, rec, http.StatusOK, "application/json")
+		assertBody(t, rec, map[string]any{"status": "ok"})
+		if !hasDeadline {
+			t.Error("the ping context has no deadline")
+		}
+	})
+
+	for _, err := range []error{wallet.ErrOverloaded, errors.New("ping the database: connection refused")} {
+		t.Run("ready gives 503 on "+err.Error(), func(t *testing.T) {
+			store := &fakeStore{t: t, ping: func(context.Context) error { return err }}
+
+			rec := serve(t, store, http.MethodGet, "/health/ready", "")
+
+			assertError(t, rec, http.StatusServiceUnavailable, "DATABASE_UNAVAILABLE", true)
+		})
+	}
+
+	for _, target := range []string{"/health/live", "/health/ready"} {
+		t.Run("POST "+target+" gives 405", func(t *testing.T) {
+			rec := serve(t, &fakeStore{t: t}, http.MethodPost, target, "")
+
+			assertError(t, rec, http.StatusMethodNotAllowed, "METHOD_NOT_ALLOWED", false)
+			if allow := rec.Header().Get("Allow"); allow != "GET, HEAD" {
+				t.Errorf("Allow = %q, want %q", allow, "GET, HEAD")
+			}
+		})
+	}
+}
+
 // fakeStore calls the function of each method. A call to a nil function fails the test.
 type fakeStore struct {
 	t        *testing.T
 	deposit  func(ctx context.Context, id uuid.UUID, amount int64) (int64, error)
 	withdraw func(ctx context.Context, id uuid.UUID, amount int64) (int64, error)
 	balance  func(ctx context.Context, id uuid.UUID) (int64, error)
+	ping     func(ctx context.Context) error
 }
 
 func (f *fakeStore) Deposit(ctx context.Context, id uuid.UUID, amount int64) (int64, error) {
@@ -296,6 +344,14 @@ func (f *fakeStore) Balance(ctx context.Context, id uuid.UUID) (int64, error) {
 		return 0, errors.New("unexpected call")
 	}
 	return f.balance(ctx, id)
+}
+
+func (f *fakeStore) Ping(ctx context.Context) error {
+	if f.ping == nil {
+		f.t.Error("unexpected call to Ping")
+		return errors.New("unexpected call")
+	}
+	return f.ping(ctx)
 }
 
 func serve(t *testing.T, store httpapi.Store, method, target, body string) *httptest.ResponseRecorder {
