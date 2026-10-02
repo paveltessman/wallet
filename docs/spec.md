@@ -279,7 +279,24 @@ A write that comes after the storage closes gets `503` with the code `DATABASE_U
 
 A signal during the start stops the start.
 
-Health checks and logging are not in the scope for now.
+#### Health checks
+
+The service has two health endpoints.
+
+| Endpoint            | Check                                      | Success | Failure                    |
+| ------------------- | ------------------------------------------ | ------- | -------------------------- |
+| `GET /health/live`  | The process serves HTTP. No database call. | `200`   |                            |
+| `GET /health/ready` | Ping to db gets an answer within 1 second. | `200`   | `503 DATABASE_UNAVAILABLE` |
+
+On success, both endpoints return `{"status":"ok"}` with `Content-Type: application/json`.
+
+The failure of readiness uses the Problem Details body of decision 9, with `retryable: true`. Every error of the ping gives `503`.
+
+A wrong HTTP method gets `405 METHOD_NOT_ALLOWED`, as on the API paths.
+
+The command `wallet healthcheck` sends `GET /health/ready` to `127.0.0.1` on `HTTP_PORT` with a 2-second timeout. It exits with code 0 on `200`, and with code 1 on any other result. The runtime image has no shell and no HTTP client, so Docker runs the probe through the binary.
+
+The `app` service in `docker-compose.yml` uses this command as its health check. The `Dockerfile` has no `HEALTHCHECK`, because the `migrate` service uses the same image. Compose restarts nothing on an unhealthy status, so the status only reports the problem.
 
 ### 18. API documentation
 
