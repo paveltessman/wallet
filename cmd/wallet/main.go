@@ -8,7 +8,9 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"os/signal"
 	"strconv"
+	"syscall"
 	"time"
 
 	"wallet/internal/httpapi"
@@ -18,6 +20,8 @@ import (
 const (
 	pingTimeout       = 5 * time.Second
 	readHeaderTimeout = 5 * time.Second
+	// Docker sends SIGKILL 10s after SIGTERM.
+	shutdownTimeout = 8 * time.Second
 )
 
 var errUsage = errors.New("usage: wallet [migrate up|down|status]")
@@ -39,7 +43,8 @@ func run(args []string) error {
 		return err
 	}
 
-	ctx := context.Background()
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, os.Interrupt)
+	defer stop()
 
 	if len(args) > 0 {
 		return migrate(ctx, cfg.databaseURL(), args[1:], os.Stdout)
@@ -64,10 +69,34 @@ func serve(ctx context.Context, cfg config) error {
 		return err
 	}
 
+	listener, err := net.Listen("tcp", net.JoinHostPort("", strconv.Itoa(cfg.HTTPPort)))
+	if err != nil {
+		return fmt.Errorf("listen: %w", err)
+	}
+
 	server := &http.Server{
-		Addr:              net.JoinHostPort("", strconv.Itoa(cfg.HTTPPort)),
 		Handler:           httpapi.NewHandler(store),
 		ReadHeaderTimeout: readHeaderTimeout,
 	}
-	return fmt.Errorf("serve HTTP: %w", server.ListenAndServe())
+	return serveHTTP(ctx, server, listener, shutdownTimeout)
+}
+
+// serveHTTP serves until ctx ends.
+func serveHTTP(ctx context.Context, server *http.Server, listener net.Listener, timeout time.Duration) error {
+	errs := make(chan error, 1)
+	go func() { errs <- server.Serve(listener) }()
+
+	select {
+	case err := <-errs:
+		return fmt.Errorf("serve HTTP: %w", err)
+	case <-ctx.Done():
+	}
+
+	shutdownCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), timeout)
+	defer cancel()
+	if err := server.Shutdown(shutdownCtx); err != nil {
+		_ = server.Close()
+		return fmt.Errorf("shut down HTTP: %w", err)
+	}
+	return nil
 }
