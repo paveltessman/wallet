@@ -21,7 +21,7 @@ make down   # Stop the stack.
 
 While the chosen write strategy may seem overengineered, there is a reason.
 
-The old simple design was making a db write for every request, awaiting for WAL to be flushed. Which takes about 1.4ms on my WSL2 (I asked Claude to measure).
+The first version was simply making a db write for every request, awaiting for WAL to be flushed. Which takes about 1.4ms on my WSL2 (I asked Claude to measure).
 
 That means, there is a hard limit on my system to about ~700 rps. But I wanted 1000.
 
@@ -192,8 +192,8 @@ On `SIGTERM` or `SIGINT`, the service stops to accept new connections, lets the 
 
 ## Idempotency
 
-The API, as described in the task, has no idempotency key. I kept the API and added `retryable` field to every error body. It is `true` only when the service knows that the operation did not apply.
+A `retryable` field is added to every error body. It is `true` only when the service knows that the operation did not apply.
 
-This does not cover a lost response. If the client times out and retries a `POST`, the operation can apply two times. An idempotency key is the correct fix for this case.
+This does not cover a lost response. If the client times out and retries a `POST`, the operation can apply two times. An idempotency key is the correct fix for this case, but the API, as described in the task, has no idempotency key.
 
 See [decision 12](docs/spec.md#12-idempotency) for the details.
