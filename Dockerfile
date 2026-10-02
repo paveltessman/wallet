@@ -26,3 +26,4 @@ FROM gcr.io/distroless/static-debian12:nonroot
 COPY --from=build /out/wallet /wallet
 
 ENTRYPOINT ["/wallet"]
+CMD ["serve"]

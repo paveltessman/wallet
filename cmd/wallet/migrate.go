@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"path/filepath"
 	"time"
 
@@ -17,6 +18,14 @@ import (
 )
 
 var errMigrateUsage = errors.New("usage: wallet migrate up|down|status")
+
+func runMigrate(ctx context.Context, args []string) error {
+	cfg, err := loadConfig(os.Getenv)
+	if err != nil {
+		return err
+	}
+	return migrate(ctx, cfg.databaseURL(), args, os.Stdout)
+}
 
 // migrate runs one goose action on the database. down rolls back one version.
 func migrate(ctx context.Context, dbURL string, args []string, out io.Writer) error {

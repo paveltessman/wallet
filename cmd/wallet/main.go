@@ -5,26 +5,25 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"net"
-	"net/http"
 	"os"
 	"os/signal"
-	"strconv"
 	"syscall"
-	"time"
-
-	"wallet/internal/httpapi"
-	"wallet/internal/postgres"
 )
 
-const (
-	pingTimeout       = 5 * time.Second
-	readHeaderTimeout = 5 * time.Second
-	// Docker sends SIGKILL 10s after SIGTERM.
-	shutdownTimeout = 8 * time.Second
-)
+type command struct {
+	name        string
+	description string
+	callback    func(context.Context, []string) error
+}
 
-var errUsage = errors.New("usage: wallet [migrate up|down|status | healthcheck]")
+func commands() []command {
+	commands := []command{
+		{"serve", "Run the HTTP server", serve},
+		{"migrate", "Apply or roll back database migrations (up|down|status)", runMigrate},
+		{"healthcheck", "Check that the local server is ready", runHealthcheck},
+	}
+	return commands
+}
 
 func main() {
 	if err := run(os.Args[1:]); err != nil {
@@ -34,76 +33,27 @@ func main() {
 }
 
 func run(args []string) error {
-	if len(args) > 0 && args[0] != "migrate" && args[0] != "healthcheck" {
-		return errUsage
-	}
-
-	cfg, err := loadConfig(os.Getenv)
-	if err != nil {
-		return err
+	if len(args) == 0 {
+		usage()
+		return errors.New("no command given")
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, os.Interrupt)
 	defer stop()
 
-	switch {
-	case len(args) == 0:
-		return serve(ctx, cfg)
-	case args[0] == "healthcheck":
-		if len(args) != 1 {
-			return errUsage
+	for _, c := range commands() {
+		if c.name == args[0] {
+			return c.callback(ctx, args[1:])
 		}
-		return healthcheck(ctx, readyURL(cfg.HTTPPort), healthcheckTimeout)
-	default:
-		return migrate(ctx, cfg.databaseURL(), args[1:], os.Stdout)
 	}
+	usage()
+	return fmt.Errorf("unknown command %q", args[0])
 }
 
-func serve(ctx context.Context, cfg config) error {
-	store, err := postgres.New(ctx, postgres.Config{
-		URL:            cfg.databaseURL(),
-		MaxConns:       cfg.DBMaxConns,
-		AcquireTimeout: cfg.DBAcquireTimeout,
-	})
-	if err != nil {
-		return err
+func usage() {
+	fmt.Fprintln(os.Stderr, "usage: wallet <command> [args]")
+	fmt.Fprintln(os.Stderr, "\ncommands:")
+	for _, c := range commands() {
+		fmt.Fprintf(os.Stderr, "  %-12s %s\n", c.name, c.description)
 	}
-	defer store.Close()
-
-	pingCtx, cancel := context.WithTimeout(ctx, pingTimeout)
-	defer cancel()
-	if err := store.Ping(pingCtx); err != nil {
-		return err
-	}
-
-	listener, err := net.Listen("tcp", net.JoinHostPort("", strconv.Itoa(cfg.HTTPPort)))
-	if err != nil {
-		return fmt.Errorf("listen: %w", err)
-	}
-
-	server := &http.Server{
-		Handler:           httpapi.NewHandler(store),
-		ReadHeaderTimeout: readHeaderTimeout,
-	}
-	return serveHTTP(ctx, server, listener, shutdownTimeout)
-}
-
-// serveHTTP serves until ctx ends.
-func serveHTTP(ctx context.Context, server *http.Server, listener net.Listener, timeout time.Duration) error {
-	errs := make(chan error, 1)
-	go func() { errs <- server.Serve(listener) }()
-
-	select {
-	case err := <-errs:
-		return fmt.Errorf("serve HTTP: %w", err)
-	case <-ctx.Done():
-	}
-
-	shutdownCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), timeout)
-	defer cancel()
-	if err := server.Shutdown(shutdownCtx); err != nil {
-		_ = server.Close()
-		return fmt.Errorf("shut down HTTP: %w", err)
-	}
-	return nil
 }
