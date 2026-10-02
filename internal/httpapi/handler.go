@@ -9,17 +9,22 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 	"uuid"
 )
 
-// maxBodyBytes limits the request body.
-const maxBodyBytes = 1024
+const (
+	// maxBodyBytes limits the request body.
+	maxBodyBytes = 1024
+	pingTimeout  = time.Second
+)
 
 // Store changes and reads the wallet balances. *postgres.Store satisfies it.
 type Store interface {
 	Deposit(ctx context.Context, id uuid.UUID, amount int64) (int64, error)
 	Withdraw(ctx context.Context, id uuid.UUID, amount int64) (int64, error)
 	Balance(ctx context.Context, id uuid.UUID) (int64, error)
+	Ping(ctx context.Context) error
 }
 
 type handler struct {
@@ -35,6 +40,11 @@ func NewHandler(store Store) http.Handler {
 	// A pattern without a method gets the other methods. The pattern with a method is more specific, so it wins.
 	mux.Handle("/api/v1/wallet", methodNotAllowed("POST"))
 	mux.Handle("/api/v1/wallet/{walletId}", methodNotAllowed("GET, HEAD"))
+
+	mux.HandleFunc("GET /health/live", h.live)
+	mux.HandleFunc("GET /health/ready", h.ready)
+	mux.Handle("/health/live", methodNotAllowed("GET, HEAD"))
+	mux.Handle("/health/ready", methodNotAllowed("GET, HEAD"))
 
 	return mux
 }
@@ -148,6 +158,32 @@ func (h *handler) balance(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, "application/json", walletResponse{WalletID: id, Balance: balance})
+}
+
+type healthResponse struct {
+	Status string `json:"status"`
+}
+
+func (h *handler) live(w http.ResponseWriter, _ *http.Request) {
+	writeJSON(w, http.StatusOK, "application/json", healthResponse{Status: "ok"})
+}
+
+func (h *handler) ready(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := context.WithTimeout(r.Context(), pingTimeout)
+	defer cancel()
+
+	// A probe asks only whether the instance can serve now, so every error gives 503.
+	if err := h.store.Ping(ctx); err != nil {
+		writeError(w, errorBody{
+			Status:    http.StatusServiceUnavailable,
+			Detail:    "The database is not available. Try again later.",
+			Code:      "DATABASE_UNAVAILABLE",
+			Retryable: true,
+		})
+		return
+	}
+
+	writeJSON(w, http.StatusOK, "application/json", healthResponse{Status: "ok"})
 }
 
 func methodNotAllowed(allow string) http.Handler {

@@ -32,6 +32,13 @@ services:
     env_file: config.env
     ports:
       - "${HTTP_PORT:?run Compose with --env-file config.env}:${HTTP_PORT}"
+
+    # The image has no shell and no HTTP client, so the binary sends the probe.
+    healthcheck:
+      test: ["CMD", "/wallet", "healthcheck"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
     depends_on:
       migrate:
         condition: service_completed_successfully
