@@ -264,7 +264,22 @@ Proposed variables:
 
 ### 17. Graceful shutdown, health checks, and logging
 
-Not in the scope for now.
+On `SIGTERM` or `SIGINT`, the service shuts down in this order:
+
+1. The HTTP server stops to accept new connections and closes the idle ones.
+2. The requests in progress finish. A write that waits in a queue still applies.
+3. The batch workers finish their batches.
+4. The service closes the connection pool and exits with code 0.
+
+The shutdown has a limit of 8 seconds.
+
+After the limit, the server closes the open connections. This ends the request contexts: a write in a queue does not apply, and a write in a batch applies. The service then exits with code 1.
+
+A write that comes after the storage closes gets `503` with the code `DATABASE_UNAVAILABLE`.
+
+A signal during the start stops the start.
+
+Health checks and logging are not in the scope for now.
 
 ### 18. API documentation
 
