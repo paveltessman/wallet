@@ -30,10 +30,15 @@ func (s *Store) write(ctx context.Context, id uuid.UUID, op operation) (int64, e
 	write := &queuedWrite{op: op, done: make(chan result, 1)}
 
 	s.mu.Lock()
+	if s.closed {
+		s.mu.Unlock()
+		return 0, errClosed
+	}
 	q, ok := s.queues[id]
 	if !ok {
 		q = &queue{}
 		s.queues[id] = q
+		s.workers.Add(1)
 		go s.drain(id, q)
 	}
 	q.writes = append(q.writes, write)
@@ -52,6 +57,8 @@ func (s *Store) write(ctx context.Context, id uuid.UUID, op operation) (int64, e
 
 // drain applies the batches of the queue until the queue is empty. Then it removes the queue.
 func (s *Store) drain(id uuid.UUID, q *queue) {
+	defer s.workers.Done()
+
 	for {
 		batch := s.take(id, q)
 		if batch == nil {

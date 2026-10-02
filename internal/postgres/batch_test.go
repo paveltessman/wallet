@@ -133,6 +133,58 @@ func TestStoreBatch(t *testing.T) {
 			time.Sleep(10 * time.Millisecond)
 		}
 	})
+
+	t.Run("Close waits for the batch and the queued writes", func(t *testing.T) {
+		store, conn := newStore(t)
+		id := insertWallet(t, conn, 100)
+
+		unlock := lockWallet(t, conn, id)
+		first := goWrite(store.Deposit, id, 10)
+		waitForLock(t, conn)
+		second := goWrite(store.Deposit, id, 5)
+		waitForQueueLen(t, store, id, 1)
+
+		closed := make(chan struct{})
+		go func() {
+			store.Close()
+			close(closed)
+		}()
+
+		// The row lock holds the batch, so Close must still wait after this delay.
+		select {
+		case <-closed:
+			t.Fatal("Close returned before the batch committed")
+		case <-time.After(100 * time.Millisecond):
+		}
+
+		unlock()
+		if r := <-first; r.err != nil || r.balance != 110 {
+			t.Errorf("first Deposit = %d, %v, want 110, nil", r.balance, r.err)
+		}
+		if r := <-second; r.err != nil || r.balance != 115 {
+			t.Errorf("second Deposit = %d, %v, want 115, nil", r.balance, r.err)
+		}
+		<-closed
+		assertBalance(t, conn, id, 115)
+	})
+
+	t.Run("a call after Close gets ErrUnavailable", func(t *testing.T) {
+		store, conn := newStore(t)
+		id := insertWallet(t, conn, 100)
+
+		store.Close()
+
+		if _, err := store.Deposit(ctx, id, 10); !errors.Is(err, wallet.ErrUnavailable) {
+			t.Errorf("Deposit err = %v, want ErrUnavailable", err)
+		}
+		if _, err := store.Balance(ctx, id); !errors.Is(err, wallet.ErrUnavailable) {
+			t.Errorf("Balance err = %v, want ErrUnavailable", err)
+		}
+		if n := postgres.QueueCount(store); n != 0 {
+			t.Errorf("queues = %d after Close, want 0", n)
+		}
+		assertBalance(t, conn, id, 100)
+	})
 }
 
 type writeResult struct {
